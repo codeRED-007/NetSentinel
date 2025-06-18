@@ -1,0 +1,3 @@
+/home/govindashan/NetSentinel/build/CMakeFiles/NetSentinel.dir
+/home/govindashan/NetSentinel/build/CMakeFiles/edit_cache.dir
+/home/govindashan/NetSentinel/build/CMakeFiles/rebuild_cache.dir

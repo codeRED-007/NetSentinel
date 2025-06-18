@@ -1,0 +1,178 @@
+// ======================== PacketSniffer.h ========================
+#ifndef PACKET_SNIFFER_H
+#define PACKET_SNIFFER_H
+
+#include <pcap.h>
+#include <thread>
+#include <functional>
+
+class PacketSniffer {
+public:
+    using PacketCallback = std::function<void(const struct pcap_pkthdr*, const u_char*)>;
+
+    PacketSniffer(const std::string& device, PacketCallback callback);
+    void start();
+    void stop();
+
+private:
+    std::string device_;
+    pcap_t* handle_;
+    std::thread snifferThread_;
+    PacketCallback callback_;
+    bool running_ = false;
+};
+
+#endif
+
+
+// ======================== PacketSniffer.cpp ========================
+#include "PacketSniffer.h"
+#include <iostream>
+
+PacketSniffer::PacketSniffer(const std::string& device, PacketCallback callback)
+    : device_(device), callback_(callback) {}
+
+void PacketSniffer::start() {
+    char errbuf[PCAP_ERRBUF_SIZE];
+    handle_ = pcap_open_live(device_.c_str(), BUFSIZ, 1, 1000, errbuf);
+    if (!handle_) {
+        std::cerr << "Could not open device " << device_ << ": " << errbuf << std::endl;
+        return;
+    }
+
+    running_ = true;
+    snifferThread_ = std::thread([this]() {
+        while (running_) {
+            struct pcap_pkthdr* header;
+            const u_char* data;
+            int result = pcap_next_ex(handle_, &header, &data);
+            if (result == 1 && callback_) {
+                callback_(header, data);
+            }
+        }
+        pcap_close(handle_);
+    });
+}
+
+void PacketSniffer::stop() {
+    running_ = false;
+    if (snifferThread_.joinable()) snifferThread_.join();
+}
+
+
+// ======================== PacketParser.h ========================
+#ifndef PACKET_PARSER_H
+#define PACKET_PARSER_H
+
+#include <netinet/ip.h>
+#include <netinet/tcp.h>
+#include <netinet/udp.h>
+#include <string>
+
+struct PacketInfo {
+    std::string srcIP;
+    std::string dstIP;
+    uint16_t srcPort;
+    uint16_t dstPort;
+    std::string protocol;
+};
+
+PacketInfo parsePacket(const u_char* data);
+
+#endif
+
+
+// ======================== PacketParser.cpp ========================
+#include "PacketParser.h"
+#include <arpa/inet.h>
+#include <netinet/ether.h>
+#include <sstream>
+
+PacketInfo parsePacket(const u_char* data) {
+    PacketInfo info;
+    const struct ether_header* eth = (struct ether_header*)data;
+    if (ntohs(eth->ether_type) != ETHERTYPE_IP) return info;
+
+    const struct ip* iphdr = (struct ip*)(data + sizeof(struct ether_header));
+    info.srcIP = inet_ntoa(iphdr->ip_src);
+    info.dstIP = inet_ntoa(iphdr->ip_dst);
+
+    if (iphdr->ip_p == IPPROTO_TCP) {
+        const struct tcphdr* tcph = (struct tcphdr*)((u_char*)iphdr + (iphdr->ip_hl << 2));
+        info.srcPort = ntohs(tcph->source);
+        info.dstPort = ntohs(tcph->dest);
+        info.protocol = "TCP";
+    } else if (iphdr->ip_p == IPPROTO_UDP) {
+        const struct udphdr* udph = (struct udphdr*)((u_char*)iphdr + (iphdr->ip_hl << 2));
+        info.srcPort = ntohs(udph->source);
+        info.dstPort = ntohs(udph->dest);
+        info.protocol = "UDP";
+    }
+    return info;
+}
+
+
+// ======================== IDS.h ========================
+#ifndef IDS_H
+#define IDS_H
+
+#include "PacketParser.h"
+#include <unordered_map>
+#include <chrono>
+#include <mutex>
+
+class IDS {
+public:
+    void analyzePacket(const PacketInfo& info);
+
+private:
+    std::unordered_map<std::string, int> synCount_;
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> lastSeen_;
+    std::mutex mutex_;
+};
+
+#endif
+
+
+// ======================== IDS.cpp ========================
+#include "IDS.h"
+#include <iostream>
+
+void IDS::analyzePacket(const PacketInfo& info) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (info.protocol == "TCP" && info.dstPort != 0) {
+        synCount_[info.srcIP]++;
+        auto now = std::chrono::steady_clock::now();
+
+        if (synCount_[info.srcIP] > 100 &&
+            std::chrono::duration_cast<std::chrono::seconds>(now - lastSeen_[info.srcIP]).count() < 5) {
+            std::cout << "[ALERT] Possible SYN Flood from " << info.srcIP << std::endl;
+            synCount_[info.srcIP] = 0;
+        }
+        lastSeen_[info.srcIP] = now;
+    }
+}
+
+
+// ======================== main.cpp ========================
+#include "PacketSniffer.h"
+#include "PacketParser.h"
+#include "IDS.h"
+
+int main() {
+    IDS ids;
+    PacketSniffer sniffer("eth0", [&](const struct pcap_pkthdr* header, const u_char* data) {
+        PacketInfo info = parsePacket(data);
+        if (!info.srcIP.empty()) {
+            ids.analyzePacket(info);
+            std::cout << "[INFO] " << info.protocol << " | Src: " << info.srcIP
+                      << " | Dst: " << info.dstIP << " | SrcPort: " << info.srcPort
+                      << " | DstPort: " << info.dstPort << std::endl;
+        }
+    });
+    sniffer.start();
+    std::cin.get();
+    sniffer.stop();
+    return 0;
+}
+

@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/NetSentinel.dir/src/IDS.cpp.o CMakeFiles/NetSentinel.dir/src/PacketParser.cpp.o CMakeFiles/NetSentinel.dir/src/PacketSniffer.cpp.o CMakeFiles/NetSentinel.dir/src/main.cpp.o -o NetSentinel  -lpcap -lpthread 
